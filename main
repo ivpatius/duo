@@ -1,0 +1,593 @@
+import sqlite3
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QLabel, QLineEdit, QPushButton, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox, QSpinBox, QInputDialog
+)
+from PyQt5.QtCore import Qt
+import sys
+import datetime
+
+
+# Подключение к базе данных
+conn = sqlite3.connect('coffeeshop.db')
+cur = conn.cursor()
+
+# Создание таблиц
+def create_tables():
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            product_id INTEGER PRIMARY KEY NOT NULL,
+            prod_name TEXT NOT NULL,
+            price REAL NOT NULL
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS customers (
+            customer_id INTEGER PRIMARY KEY NOT NULL,
+            FIO TEXT NOT NULL,
+            phone_number TEXT NOT NULL,
+            district TEXT NOT NULL,
+            adress TEXT NOT NULL
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+        order_id INTEGER PRIMARY KEY NOT NULL,
+        customer_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'не готов',
+        order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- автоматическое заполнение текущей датой
+        FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+        )
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS order_details (
+            order_detail_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES orders(order_id),
+            FOREIGN KEY (product_id) REFERENCES products(product_id)
+        )
+    ''')
+
+    conn.commit()
+
+
+
+class LoginWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Вход в систему")
+        self.setGeometry(100, 100, 300, 200)
+
+        self.username_label = QLabel("Имя пользователя:", self)
+        self.username_label.move(20, 30)
+        self.username_input = QLineEdit(self)
+        self.username_input.move(140, 30)
+
+        self.password_label = QLabel("Пароль:", self)
+        self.password_label.move(20, 70)
+        self.password_input = QLineEdit(self)
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.move(140, 70)
+
+        self.login_button = QPushButton("Войти", self)
+        self.login_button.move(100, 120)
+        self.login_button.clicked.connect(self.login)
+
+    def login(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+
+        cur.execute('SELECT role FROM users WHERE username=? AND password=?', (username, password))
+        result = cur.fetchone()
+
+        if result:
+            role = result[0]
+            self.open_main_window(username, role)
+        else:
+            QMessageBox.warning(self, "Ошибка", "Неверное имя пользователя или пароль.")
+
+    def open_main_window(self, username, role):
+        self.main_window = CoffeeShopApp(username, role)
+        self.main_window.show()
+        self.close()
+
+
+# Главный класс окна
+class CoffeeShopApp(QMainWindow):
+    def __init__(self, username, role):
+        super().__init__()
+        self.username = username
+        self.role = role
+        self.customer_id = None  # ID клиента для заказов
+
+        self.setWindowTitle(f"Управление CoffeeShop - {self.role.capitalize()}")
+        self.setGeometry(100, 100, 800, 600)
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.layout = QVBoxLayout()
+
+        if self.role == "клиент":
+            self.add_customer_controls()
+        elif self.role == "администратор":
+            self.add_admin_controls()
+        elif self.role == "менеджер":
+            self.add_manager_controls()
+        elif self.role == "бариста":
+            self.add_barista_controls()
+
+        container = QWidget()
+        container.setLayout(self.layout)
+        self.setCentralWidget(container)
+
+    # Клиент
+    def add_customer_controls(self):
+        # Ввод ФИО
+        self.fio_label = QLabel("Введите ваше ФИО:")
+        self.fio_input = QLineEdit()
+        self.check_fio_button = QPushButton("Проверить ФИО")
+        self.check_fio_button.clicked.connect(self.check_fio)
+
+        self.layout.addWidget(self.fio_label)
+        self.layout.addWidget(self.fio_input)
+        self.layout.addWidget(self.check_fio_button)
+
+        # Поля для дополнительных данных
+        self.phone_label = QLabel("Телефон:")
+        self.phone_input = QLineEdit()
+        self.district_label = QLabel("Район:")
+        self.district_input = QLineEdit()
+        self.address_label = QLabel("Адрес:")
+        self.address_input = QLineEdit()
+        self.register_customer_button = QPushButton("Зарегистрироваться")
+        self.register_customer_button.clicked.connect(self.register_customer)
+
+        self.layout.addWidget(self.phone_label)
+        self.layout.addWidget(self.phone_input)
+        self.layout.addWidget(self.district_label)
+        self.layout.addWidget(self.district_input)
+        self.layout.addWidget(self.address_label)
+        self.layout.addWidget(self.address_input)
+        self.layout.addWidget(self.register_customer_button)
+
+        # скрыты до проверки ФИО
+        self.phone_label.hide()
+        self.phone_input.hide()
+        self.district_label.hide()
+        self.district_input.hide()
+        self.address_label.hide()
+        self.address_input.hide()
+        self.register_customer_button.hide()
+
+        # Таблица продуктов и возможность сделать заказ
+        self.product_table = QTableWidget()
+        self.product_table.setColumnCount(3)
+        self.product_table.setHorizontalHeaderLabels(["ID", "Название", "Цена"])
+
+        self.quantity_label = QLabel("Количество:")
+        self.quantity_spinbox = QSpinBox()
+        self.quantity_spinbox.setMinimum(1)
+
+        self.make_order_button = QPushButton("Сделать заказ")
+        self.make_order_button.clicked.connect(self.make_order)
+
+        self.layout.addWidget(self.product_table)
+        self.layout.addWidget(self.quantity_label)
+        self.layout.addWidget(self.quantity_spinbox)
+        self.layout.addWidget(self.make_order_button)
+
+        # Скрываем таблицу продуктов и возможность сделать заказ до проверки ФИО
+        self.product_table.hide()
+        self.quantity_label.hide()
+        self.quantity_spinbox.hide()
+        self.make_order_button.hide()
+
+        self.fetch_products()
+
+    def check_fio(self):
+        fio = self.fio_input.text()
+        cur.execute('SELECT customer_id FROM customers WHERE FIO=?', (fio,))
+        customer = cur.fetchone()
+
+        if customer:
+            self.customer_id = customer[0]
+            QMessageBox.information(self, "Успех", "ФИО найден. Вы можете сделать заказ.")
+            # таблица продуктов и возможность сделать заказ
+            self.product_table.show()
+            self.quantity_label.show()
+            self.quantity_spinbox.show()
+            self.make_order_button.show()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Ваше ФИО не найдено. Пожалуйста, заполните данные для регистрации.")
+            # поля для регистрации
+            self.phone_label.show()
+            self.phone_input.show()
+            self.district_label.show()
+            self.district_input.show()
+            self.address_label.show()
+            self.address_input.show()
+            self.register_customer_button.show()
+
+    def register_customer(self):
+        fio = self.fio_input.text()
+        phone = self.phone_input.text()
+        district = self.district_input.text()
+        address = self.address_input.text()
+
+        if fio and phone and district and address:
+            cur.execute('INSERT INTO customers (FIO, phone_number, district, adress) VALUES (?, ?, ?, ?)',
+                        (fio, phone, district, address))
+            conn.commit()
+            self.customer_id = cur.lastrowid
+            QMessageBox.information(self, "Успех", "Регистрация успешна. Теперь вы можете сделать заказ.")
+            # Скрываем поля для регистрации и показываем возможность сделать заказ
+            self.phone_label.hide()
+            self.phone_input.hide()
+            self.district_label.hide()
+            self.district_input.hide()
+            self.address_label.hide()
+            self.address_input.hide()
+            self.register_customer_button.hide()
+            self.product_table.show()
+            self.quantity_label.show()
+            self.quantity_spinbox.show()
+            self.make_order_button.show()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Заполните все поля для регистрации.")
+
+    def fetch_products(self):
+        self.product_table.setRowCount(0)
+        cur.execute('SELECT * FROM products')
+        rows = cur.fetchall()
+        for row in rows:
+            row_position = self.product_table.rowCount()
+            self.product_table.insertRow(row_position)
+            self.product_table.setItem(row_position, 0, QTableWidgetItem(str(row[0])))
+            self.product_table.setItem(row_position, 1, QTableWidgetItem(row[1]))
+            self.product_table.setItem(row_position, 2, QTableWidgetItem(str(row[2])))
+
+    def make_order(self):
+        selected_product = self.product_table.currentRow()
+        if selected_product >= 0 and self.customer_id:
+            product_id = self.product_table.item(selected_product, 0).text()  # Получаем ID продукта
+            quantity = self.quantity_spinbox.value()
+
+
+            try:
+
+                cur.execute('INSERT INTO orders (customer_id) VALUES (?)', (self.customer_id,))
+                order_id = cur.lastrowid  # Получаем ID только что созданного заказа
+                cur.execute('INSERT INTO order_details (order_id, product_id, quantity) VALUES (?, ?, ?)',
+                            (order_id, product_id, quantity))
+                conn.commit()
+                QMessageBox.information(self, "Успех", "Заказ был успешно создан.")
+
+            except sqlite3.Error as e:
+                print("Ошибка при добавлении заказа:", e)
+                QMessageBox.warning(self, "Ошибка", f"Ошибка при добавлении заказа: {e}")
+
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите продукт для заказа.")
+
+    # Администратор
+    def add_admin_controls(self):
+        # Кнопка для просмотра статистики
+        self.view_statistics_button = QPushButton("Просмотреть статистику")
+        self.view_statistics_button.clicked.connect(self.view_statistics)
+        self.layout.addWidget(self.view_statistics_button)
+
+        # Таблица для отображения статистики
+        self.statistics_table = QTableWidget()
+        self.statistics_table.setColumnCount(3)
+        self.statistics_table.setHorizontalHeaderLabels(["Параметр", "Значение", "Детали"])
+        self.layout.addWidget(self.statistics_table)
+
+    # Функция для получения и отображения статистики
+    def view_statistics(self):
+        self.statistics_table.setRowCount(0)  # Очищаем таблицу перед загрузкой новых данных
+
+        try:
+            # Шаг 1: Получаем количество сделанных заказов
+            cur.execute('SELECT COUNT(*) FROM orders')
+            total_orders = cur.fetchone()[0]
+
+            # Добавляем в таблицу статистику по количеству заказов
+            self.add_statistic_row("Количество сделанных заказов", str(total_orders), "")
+
+            # Шаг 2: Получаем статистику по заказанным товарам (сколько раз каждый товар был заказан)
+            cur.execute('''
+                SELECT products.prod_name, SUM(order_details.quantity) as total_quantity
+                FROM order_details
+                JOIN products ON order_details.product_id = products.product_id
+                GROUP BY products.prod_name
+            ''')
+            products_stats = cur.fetchall()
+
+            for product_stat in products_stats:
+                product_name = product_stat[0]
+                total_quantity = product_stat[1]
+                self.add_statistic_row("Продукт", product_name, f"Количество заказов: {total_quantity}")
+
+            # Шаг 3: Получаем статистику по районам (из каких районов больше всего заказов)
+            cur.execute('''
+                SELECT customers.district, COUNT(orders.order_id) as total_orders
+                FROM orders
+                JOIN customers ON orders.customer_id = customers.customer_id
+                GROUP BY customers.district
+                ORDER BY total_orders DESC
+            ''')
+            district_stats = cur.fetchall()
+
+            for district_stat in district_stats:
+                district_name = district_stat[0]
+                district_orders = district_stat[1]
+                self.add_statistic_row("Район", district_name, f"Количество заказов: {district_orders}")
+
+            # Шаг 4: Получаем статистику по статусу заказов
+            cur.execute('''
+                SELECT status, COUNT(*) as count
+                FROM orders
+                GROUP BY status
+            ''')
+            status_stats = cur.fetchall()
+
+            for status_stat in status_stats:
+                status_name = status_stat[0]
+                status_count = status_stat[1]
+                self.add_statistic_row("Статус заказа", status_name, f"Количество: {status_count}")
+
+        except sqlite3.Error as e:
+            print("Ошибка при получении статистики:", e)
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при получении статистики: {e}")
+
+    # Вспомогательная функция для добавления строки в таблицу статистики
+    def add_statistic_row(self, param_name, value, details):
+        row_position = self.statistics_table.rowCount()
+        self.statistics_table.insertRow(row_position)
+        self.statistics_table.setItem(row_position, 0, QTableWidgetItem(param_name))
+        self.statistics_table.setItem(row_position, 1, QTableWidgetItem(value))
+        self.statistics_table.setItem(row_position, 2, QTableWidgetItem(details))
+
+    # Менеджер
+    def add_manager_controls(self):
+        # Менеджер может добавлять и удалять продукты, а также управлять клиентами
+        self.prod_name_label = QLabel("Название продукта:")
+        self.prod_name_input = QLineEdit()
+
+        self.price_label = QLabel("Цена:")
+        self.price_input = QLineEdit()
+
+        self.add_product_button = QPushButton("Добавить продукт")
+        self.add_product_button.clicked.connect(self.add_product)
+
+        self.delete_product_button = QPushButton("Удалить продукт")
+        self.delete_product_button.clicked.connect(self.delete_product)
+
+        # Управление клиентами
+        self.view_clients_button = QPushButton("Просмотреть клиентов")
+        self.view_clients_button.clicked.connect(self.view_clients)
+
+        self.add_client_button = QPushButton("Добавить клиента")
+        self.add_client_button.clicked.connect(self.add_client)
+
+        self.delete_client_button = QPushButton("Удалить клиента")
+        self.delete_client_button.clicked.connect(self.delete_client)
+
+        # Добавление виджетов в макет
+        self.layout.addWidget(self.prod_name_label)
+        self.layout.addWidget(self.prod_name_input)
+        self.layout.addWidget(self.price_label)
+        self.layout.addWidget(self.price_input)
+        self.layout.addWidget(self.add_product_button)
+        self.layout.addWidget(self.delete_product_button)
+
+        self.layout.addWidget(self.view_clients_button)
+        self.layout.addWidget(self.add_client_button)
+        self.layout.addWidget(self.delete_client_button)
+
+        self.product_table = QTableWidget()
+        self.product_table.setColumnCount(3)
+        self.product_table.setHorizontalHeaderLabels(["ID", "Название", "Цена"])
+        self.layout.addWidget(self.product_table)
+
+        self.clients_table = QTableWidget()
+        self.clients_table.setColumnCount(5)
+        self.clients_table.setHorizontalHeaderLabels(["ID", "ФИО", "Телефон", "Район", "Адрес"])
+        self.layout.addWidget(self.clients_table)
+
+        self.fetch_products()
+
+    # Функция для получения списка продуктов
+    def fetch_products(self):
+        self.product_table.setRowCount(0)
+        cur.execute('SELECT * FROM products')
+        rows = cur.fetchall()
+        for row in rows:
+            row_position = self.product_table.rowCount()
+            self.product_table.insertRow(row_position)
+            self.product_table.setItem(row_position, 0, QTableWidgetItem(str(row[0])))
+            self.product_table.setItem(row_position, 1, QTableWidgetItem(row[1]))
+            self.product_table.setItem(row_position, 2, QTableWidgetItem(str(row[2])))
+
+            # Функция для добавления продукта
+
+    def add_product(self):
+        prod_name = self.prod_name_input.text()
+        price = self.price_input.text()
+
+        if prod_name and price:
+            cur.execute('INSERT INTO products (prod_name, price) VALUES (?, ?)', (prod_name, price))
+            conn.commit()
+            QMessageBox.information(self, "Успех", f'Продукт "{prod_name}" добавлен.')
+            self.prod_name_input.clear()
+            self.price_input.clear()
+            self.fetch_products()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Заполните все поля.")
+
+    # Функция для удаления продукта
+    def delete_product(self):
+        selected = self.product_table.currentRow()
+        if selected >= 0:
+            product_id = self.product_table.item(selected, 0).text()
+            cur.execute('DELETE FROM products WHERE product_id = ?', (product_id,))
+            conn.commit()
+            QMessageBox.information(self, "Успех", f'Продукт с ID {product_id} удален.')
+            self.fetch_products()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите продукт для удаления.")
+
+    # Функция для просмотра списка клиентов
+    def view_clients(self):
+        self.clients_table.setRowCount(0)
+        cur.execute('SELECT * FROM customers')
+        rows = cur.fetchall()
+        for row in rows:
+            row_position = self.clients_table.rowCount()
+            self.clients_table.insertRow(row_position)
+            self.clients_table.setItem(row_position, 0, QTableWidgetItem(str(row[0])))
+            self.clients_table.setItem(row_position, 1, QTableWidgetItem(row[1]))
+            self.clients_table.setItem(row_position, 2, QTableWidgetItem(row[2]))
+            self.clients_table.setItem(row_position, 3, QTableWidgetItem(row[3]))
+            self.clients_table.setItem(row_position, 4, QTableWidgetItem(str(row[4])))
+
+            # Функция для добавления клиента
+
+    def add_client(self):
+        fio, ok = QInputDialog.getText(self, 'ФИО клиента', 'Введите ФИО:')
+        phone, ok2 = QInputDialog.getText(self, 'Телефон клиента', 'Введите телефон:')
+        district, ok3 = QInputDialog.getText(self, 'Район клиента', 'Введите район:')
+        address, ok4 = QInputDialog.getText(self, 'Адрес клиента', 'Введите адрес:')
+
+        if fio and phone and district and address:
+            cur.execute('INSERT INTO customers (FIO, phone_number, district, adress) VALUES (?, ?, ?, ?)',
+                        (fio, phone, district, address))
+            conn.commit()
+            QMessageBox.information(self, "Успех", f'Клиент "{fio}" добавлен.')
+            self.view_clients()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Заполните все поля.")
+
+    # Функция для удаления клиента
+    def delete_client(self):
+        selected = self.clients_table.currentRow()
+        if selected >= 0:
+            client_id = self.clients_table.item(selected, 0).text()
+            cur.execute('DELETE FROM customers WHERE customer_id = ?', (client_id,))
+            conn.commit()
+            QMessageBox.information(self, "Успех", f'Клиент с ID {client_id} удален.')
+            self.view_clients()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите клиента для удаления.")
+
+    # Бариста
+    # Функция для получения и отображения деталей заказов
+    def add_barista_controls(self):
+        # Бариста может просматривать детали заказов
+        self.view_order_details_button = QPushButton("Просмотреть детали заказов")
+        self.view_order_details_button.clicked.connect(self.view_order_details)
+
+        # Кнопка для обновления статуса заказа
+        self.update_status_button = QPushButton("Отметить заказ как готовый")
+        self.update_status_button.clicked.connect(self.update_order_status)
+
+        # Добавляем кнопки в layout
+        self.layout.addWidget(self.view_order_details_button)
+        self.layout.addWidget(self.update_status_button)
+
+        # Таблица для отображения деталей заказов
+        self.order_details_table = QTableWidget()
+        self.order_details_table.setColumnCount(5)  # Добавляем еще один столбец для статуса
+        self.order_details_table.setHorizontalHeaderLabels(["ID заказа", "Клиент", "Продукт", "Количество", "Статус"])
+        self.layout.addWidget(self.order_details_table)
+
+    # Функция для получения и отображения данных из таблицы order_details
+    def view_order_details(self):
+        self.order_details_table.setRowCount(0)  # Очищаем таблицу перед загрузкой новых данных
+
+        try:
+            # Выполняем запрос для получения данных из order_details
+            cur.execute('''
+                SELECT orders.order_id, customers.FIO, products.prod_name, order_details.quantity, orders.status
+                FROM order_details
+                JOIN orders ON order_details.order_id = orders.order_id
+                JOIN customers ON orders.customer_id = customers.customer_id
+                JOIN products ON order_details.product_id = products.product_id
+            ''')
+
+            rows = cur.fetchall()
+
+            if rows:
+                # Заполняем таблицу полученными данными
+                for row in rows:
+                    row_position = self.order_details_table.rowCount()
+                    self.order_details_table.insertRow(row_position)
+                    self.order_details_table.setItem(row_position, 0, QTableWidgetItem(str(row[0])))  # ID заказа
+                    self.order_details_table.setItem(row_position, 1, QTableWidgetItem(row[1]))  # Клиент
+                    self.order_details_table.setItem(row_position, 2, QTableWidgetItem(row[2]))  # Продукт
+                    self.order_details_table.setItem(row_position, 3, QTableWidgetItem(str(row[3])))  # Количество
+                    self.order_details_table.setItem(row_position, 4, QTableWidgetItem(row[4]))  # Статус
+            else:
+                QMessageBox.information(self, "Информация", "Детали заказов отсутствуют.")
+
+        except sqlite3.Error as e:
+            print("Ошибка при получении данных из order_details:", e)
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при получении данных: {e}")
+
+    # Функция для обновления статуса заказа
+    def update_order_status(self):
+        selected_row = self.order_details_table.currentRow()
+        if selected_row >= 0:
+            order_id = self.order_details_table.item(selected_row, 0).text()  # Получаем ID заказа
+            new_status = 'готов'  # Новый статус для заказа
+
+            try:
+                cur.execute('UPDATE orders SET status = ? WHERE order_id = ?', (new_status, order_id))
+                conn.commit()
+                QMessageBox.information(self, "Успех", f'Заказ с ID {order_id} отмечен как готовый.')
+                self.view_order_details()  # Обновляем таблицу после изменения статуса
+            except sqlite3.Error as e:
+                QMessageBox.warning(self, "Ошибка", f"Ошибка при обновлении статуса: {e}")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите заказ для изменения статуса.")
+
+
+if __name__ == '__main__':
+    create_tables()
+
+    app = QApplication(sys.argv)
+
+    # Создание тестовых пользователей
+    cur.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES ('admin', '123', 'администратор')")
+    cur.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES ('manager', '123', 'менеджер')")
+    cur.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES ('barista', '123', 'бариста')")
+    cur.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES ('client', '123', 'клиент')")
+    conn.commit()
+
+    login_window = LoginWindow()
+    login_window.show()
+
+    sys.exit(app.exec_())
+
+    conn.close()
+
+
+#Добавить меннеджеру возможность смотреть пользователей и так удалять их
+#Бариста может смотреть таблицу деталей заказов
+#Администратор может смотреть статистику: сколько сделано заказов, какие и сколько товаров заказали, из каких районов заказывали чаще всего
+
